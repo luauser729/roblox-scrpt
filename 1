@@ -1,0 +1,653 @@
+-- 谁打了一巴掌 | 深蓝流动边框 + 自由视角(长按方向键, 关面板不消失) + 反转镜头 + 强制第三人称
+local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/KingScriptAE/No-sirve-nada./refs/heads/main/main.lua"))()
+if not WindUI then return end
+
+local FLOW_SPEED = 5.5
+local BORDER_THICKNESS = 1.7
+local FIXED_FONT = Enum.Font.SourceSansBold
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Events = ReplicatedStorage:FindFirstChild("Events")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local VERSION = "v1.0.6"
+local boxFarm = false
+local chairFarm = false
+local showPlayer = false
+local freeCam = false
+local flipCam = false
+local forceThird = false
+local screenGui = nil
+local frame = nil
+local textLabel = nil
+
+-- 自由视角
+local freeCamConnection = nil
+local freeCamPos = nil
+local freeCamRotX = 0
+local freeCamRotY = 0
+local freeCamOriginalType = nil
+local touchStartedConn = nil
+local touchMovedConn = nil
+local touchEndedConn = nil
+local moveState = { f = false, b = false, l = false, r = false, u = false, d = false }
+local freeCamGui = nil
+local freeCamBtns = {}
+local guiGuardConn = nil
+
+-- 反转镜头
+local flipConnection = nil
+local originalCameraType = nil
+
+-- 强制第三人称
+local thirdConnection = nil
+local thirdOriginalType = nil
+local thirdCameraAngleX = 15
+local thirdCameraAngleY = 0
+local thirdTouchConn = nil
+local thirdTouchMovedConn = nil
+
+-- ===== 边框主题 =====
+local WhiteFlowTheme = ColorSequence.new({
+	ColorSequenceKeypoint.new(0.00, Color3.fromHex("0A1A3A")),
+	ColorSequenceKeypoint.new(0.25, Color3.fromHex("1E3A8A")),
+	ColorSequenceKeypoint.new(0.45, Color3.fromHex("2563EB")),
+	ColorSequenceKeypoint.new(0.55, Color3.fromHex("60A5FA")),
+	ColorSequenceKeypoint.new(0.75, Color3.fromHex("3B82F6")),
+	ColorSequenceKeypoint.new(1.00, Color3.fromHex("0A1A3A")),
+})
+local borderAnimation
+local borderInitialized = false
+
+function gradient(text, startColor, endColor)
+    local result = ""
+    local chars = {}
+    for uchar in text:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        table.insert(chars, uchar)
+    end
+    local length = #chars
+    for i = 1, length do
+        local t = (i - 1) / math.max(length - 1, 1)
+        local r = startColor.R + (endColor.R - startColor.R) * t
+        local g = startColor.G + (endColor.G - startColor.G) * t
+        local b = startColor.B + (endColor.B - startColor.B) * t
+        result = result .. string.format('<font color="rgb(%d,%d,%d)">%s</font>', 
+            math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), chars[i])
+    end
+    return result
+end
+
+local function StartFontEnforcer()
+    if not Window or not Window.UIElements then 
+        task.wait(1)
+        if not Window or not Window.UIElements then return end
+    end  
+    local MainFrame = Window.UIElements.Main
+    local function setFont(instance)
+        if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+            pcall(function() instance.Font = FIXED_FONT instance.RichText = true end)
+        end
+    end
+    for _, child in ipairs(MainFrame:GetDescendants()) do setFont(child) end
+    MainFrame.DescendantAdded:Connect(function(child) setFont(child) end)
+end
+
+local function createBorder(window)
+    if not window or not window.UIElements then
+        task.wait(1)
+        if not window or not window.UIElements then return nil end
+    end
+    local mainFrame = window.UIElements.Main
+    if not mainFrame then return nil end    
+    if mainFrame:FindFirstChild("FlowBorder") then return mainFrame.FlowBorder end    
+    if not mainFrame:FindFirstChildOfClass("UICorner") then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 16)
+        corner.Parent = mainFrame
+    end    
+    local stroke = Instance.new("UIStroke")
+    stroke.Name = "FlowBorder"
+    stroke.Thickness = BORDER_THICKNESS
+    stroke.Color = Color3.new(1, 1, 1)
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.LineJoinMode = Enum.LineJoinMode.Round
+    stroke.Enabled = true
+    stroke.Parent = mainFrame    
+    local gradient = Instance.new("UIGradient")
+    gradient.Name = "StreamEffect"
+    gradient.Color = WhiteFlowTheme
+    gradient.Rotation = 0
+    gradient.Parent = stroke    
+    return stroke
+end
+
+local function startBorderAnimation(window)
+    if not window or not window.UIElements then return nil end
+    local mainFrame = window.UIElements.Main
+    if not mainFrame then return nil end    
+    local stroke = mainFrame:FindFirstChild("FlowBorder")
+    if not stroke then return nil end    
+    local gradient = stroke:FindFirstChild("StreamEffect")
+    if not gradient then return nil end    
+    if borderAnimation then borderAnimation:Disconnect() borderAnimation = nil end    
+    local animation
+    animation = RunService.Heartbeat:Connect(function()
+        if not stroke or stroke.Parent == nil then animation:Disconnect() return end
+        gradient.Rotation = (tick() * FLOW_SPEED * 20) % 360
+    end)
+    borderAnimation = animation
+    return animation
+end
+
+-- ===== 最近玩家 UI =====
+local function createUI()
+    if screenGui then screenGui:Destroy() screenGui = nil end
+    screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SlapDisplay"
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 9999
+    screenGui.Enabled = true
+    frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 350, 0, 60)
+    frame.Position = UDim2.new(0.5, -175, 0.02, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    frame.BackgroundTransparency = 0.5
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 16)
+    textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = "附近玩家: 无"
+    textLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    textLabel.Font = Enum.Font.GothamBold
+    textLabel.TextSize = 20
+    textLabel.TextScaled = true
+    textLabel.Parent = frame
+end
+
+local function destroyUI()
+    if screenGui then screenGui:Destroy() screenGui = nil frame = nil textLabel = nil end
+end
+
+local function getNearestPlayer()
+    local char = LocalPlayer.Character
+    if not char then return "无" end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return "无" end
+    local myPos = hrp.Position
+    local nearest, nearestDist = nil, math.huge
+    for _, plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local t = plr.Character:FindFirstChild("HumanoidRootPart")
+            if t then
+                local d = (myPos - t.Position).Magnitude
+                if d < nearestDist then nearestDist = d nearest = plr end
+            end
+        end
+    end
+    return nearest and nearest.DisplayName or "无"
+end
+
+-- ===== 自由视角：方向按钮（长按移动，松手即停） =====
+local function updateButtonVisuals()
+    for key, btn in pairs(freeCamBtns) do
+        if moveState[key] then
+            btn.BackgroundColor3 = Color3.fromRGB(80, 160, 255)
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(40, 90, 200)
+        end
+    end
+end
+
+local function makeDirectionButton(parent, text, key, pos)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 65, 0, 65)
+    btn.Position = pos
+    btn.BackgroundColor3 = Color3.fromRGB(40, 90, 200)
+    btn.BackgroundTransparency = 0.15
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.TextScaled = true
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    btn.Parent = parent
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 14)
+    freeCamBtns[key] = btn
+
+    local function press()
+        moveState[key] = true
+        updateButtonVisuals()
+    end
+    local function release()
+        moveState[key] = false
+        updateButtonVisuals()
+    end
+
+    btn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            press()
+        end
+    end)
+    btn.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            release()
+        end
+    end)
+
+    return btn
+end
+
+local function createFreeCamGui()
+    if freeCamGui then freeCamGui:Destroy() freeCamGui = nil end
+    freeCamBtns = {}
+
+    local parentGui = CoreGui
+    local ok = pcall(function()
+        if not CoreGui:FindFirstChild("FreeCamControls") then
+            local test = Instance.new("ScreenGui")
+            test.Name = "FreeCamControls"
+            test.Parent = CoreGui
+        end
+    end)
+    if not ok then parentGui = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local existing = parentGui:FindFirstChild("FreeCamControls")
+    if existing then existing:Destroy() end
+
+    freeCamGui = Instance.new("ScreenGui")
+    freeCamGui.Name = "FreeCamControls"
+    freeCamGui.Parent = parentGui
+    freeCamGui.ResetOnSpawn = false
+    freeCamGui.IgnoreGuiInset = true
+    freeCamGui.DisplayOrder = 2147483647
+
+    makeDirectionButton(freeCamGui, "前", "f", UDim2.new(0, 90, 1, -270))
+    makeDirectionButton(freeCamGui, "后", "b", UDim2.new(0, 90, 1, -190))
+    makeDirectionButton(freeCamGui, "左", "l", UDim2.new(0, 20, 1, -190))
+    makeDirectionButton(freeCamGui, "右", "r", UDim2.new(0, 160, 1, -190))
+    makeDirectionButton(freeCamGui, "上", "u", UDim2.new(1, -150, 1, -190))
+    makeDirectionButton(freeCamGui, "下", "d", UDim2.new(1, -150, 1, -110))
+end
+
+local function destroyFreeCamGui()
+    if guiGuardConn then guiGuardConn:Disconnect() guiGuardConn = nil end
+    if freeCamGui then pcall(function() freeCamGui:Destroy() end) freeCamGui = nil end
+    pcall(function()
+        local a = CoreGui:FindFirstChild("FreeCamControls")
+        if a then a:Destroy() end
+    end)
+    pcall(function()
+        local b = LocalPlayer:FindFirstChild("PlayerGui")
+        if b then
+            local c = b:FindFirstChild("FreeCamControls")
+            if c then c:Destroy() end
+        end
+    end)
+    freeCamBtns = {}
+    for k in pairs(moveState) do moveState[k] = false end
+end
+
+local function stopFreeCam()
+    if touchStartedConn then touchStartedConn:Disconnect() touchStartedConn = nil end
+    if touchMovedConn then touchMovedConn:Disconnect() touchMovedConn = nil end
+    if touchEndedConn then touchEndedConn:Disconnect() touchEndedConn = nil end
+    if freeCamConnection then freeCamConnection:Disconnect() freeCamConnection = nil end
+    local camera = workspace.CurrentCamera
+    if freeCamOriginalType then
+        camera.CameraType = freeCamOriginalType
+        freeCamOriginalType = nil
+    end
+    destroyFreeCamGui()
+    freeCam = false
+end
+
+local function startFreeCam()
+    local camera = workspace.CurrentCamera
+    freeCamOriginalType = camera.CameraType
+    camera.CameraType = Enum.CameraType.Scriptable
+    freeCamPos = camera.CFrame.Position
+    local look = camera.CFrame.LookVector
+    freeCamRotY = math.deg(math.atan2(-look.X, -look.Z))
+    freeCamRotX = math.deg(math.asin(math.clamp(look.Y, -1, 1)))
+
+    createFreeCamGui()
+
+    guiGuardConn = RunService.Heartbeat:Connect(function()
+        if freeCam and (not freeCamGui or not freeCamGui.Parent) then
+            createFreeCamGui()
+        end
+    end)
+
+    local lastTouchPos = nil
+    touchStartedConn = UserInputService.TouchStarted:Connect(function(input, gpe)
+        if gpe then return end
+        lastTouchPos = input.Position
+    end)
+    touchMovedConn = UserInputService.TouchMoved:Connect(function(input, gpe)
+        if gpe then return end
+        if lastTouchPos then
+            local delta = input.Position - lastTouchPos
+            lastTouchPos = input.Position
+            freeCamRotY = freeCamRotY - delta.X * 0.4
+            freeCamRotX = math.clamp(freeCamRotX - delta.Y * 0.4, -89, 89)
+        end
+    end)
+    touchEndedConn = UserInputService.TouchEnded:Connect(function()
+        lastTouchPos = nil
+    end)
+
+    local speed = 1.2
+    freeCamConnection = RunService.RenderStepped:Connect(function(dt)
+        local move = Vector3.zero
+        if moveState.f then move = move + Vector3.new(0,0,-1) end
+        if moveState.b then move = move + Vector3.new(0,0,1) end
+        if moveState.l then move = move + Vector3.new(-1,0,0) end
+        if moveState.r then move = move + Vector3.new(1,0,0) end
+        if moveState.u then move = move + Vector3.new(0,1,0) end
+        if moveState.d then move = move + Vector3.new(0,-1,0) end
+
+        local rot = CFrame.fromEulerAnglesYXZ(math.rad(freeCamRotX), math.rad(freeCamRotY), 0)
+        local worldMove = rot:VectorToWorldSpace(move)
+        if worldMove.Magnitude > 1 then worldMove = worldMove.Unit end
+        freeCamPos = freeCamPos + worldMove * speed * 40 * dt
+        camera.CFrame = CFrame.new(freeCamPos) * rot
+    end)
+    freeCam = true
+end
+
+-- ===== 反转镜头 =====
+local function stopFlipCam()
+    if flipConnection then flipConnection:Disconnect() flipConnection = nil end
+    local camera = workspace.CurrentCamera
+    if originalCameraType then camera.CameraType = originalCameraType originalCameraType = nil end
+end
+
+local function startFlipCam()
+    local camera = workspace.CurrentCamera
+    if not originalCameraType then originalCameraType = camera.CameraType end
+    camera.CameraType = Enum.CameraType.Scriptable
+    flipConnection = RunService.RenderStepped:Connect(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local lookDir = hrp.CFrame.LookVector
+        local camPos = hrp.Position + lookDir * 12 + Vector3.new(0, 4, 0)
+        camera.CFrame = CFrame.new(camPos, hrp.Position - lookDir * 20)
+    end)
+end
+
+-- ===== 强制第三人称（重写：无视游戏第一人称锁定） =====
+local function stopForceThird()
+    if thirdConnection then thirdConnection:Disconnect() thirdConnection = nil end
+    if thirdTouchConn then thirdTouchConn:Disconnect() thirdTouchConn = nil end
+    if thirdTouchMovedConn then thirdTouchMovedConn:Disconnect() thirdTouchMovedConn = nil end
+    
+    local camera = workspace.CurrentCamera
+    if thirdOriginalType then 
+        camera.CameraType = thirdOriginalType 
+        thirdOriginalType = nil 
+    end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then 
+        pcall(function() 
+            hum.CameraOffset = Vector3.zero 
+            hum.CameraMode = Enum.CameraMode.Classic
+        end) 
+    end
+    pcall(function() LocalPlayer.CameraMode = Enum.CameraMode.Classic end)
+end
+
+local function startForceThird()
+    local camera = workspace.CurrentCamera
+    thirdOriginalType = camera.CameraType
+    
+    -- 强行接管相机
+    pcall(function() LocalPlayer.CameraMode = Enum.CameraMode.Classic end)
+    camera.CameraType = Enum.CameraType.Scriptable
+    
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function() hum.CameraMode = Enum.CameraMode.Classic end)
+    end
+
+    thirdCameraAngleX = 15
+    thirdCameraAngleY = 0
+
+    -- 手机触摸转视角
+    local lastTouchPos = nil
+    thirdTouchConn = UserInputService.TouchStarted:Connect(function(input, gpe)
+        if gpe then return end
+        lastTouchPos = input.Position
+    end)
+    thirdTouchMovedConn = UserInputService.TouchMoved:Connect(function(input, gpe)
+        if gpe then return end
+        if lastTouchPos then
+            local delta = input.Position - lastTouchPos
+            lastTouchPos = input.Position
+            thirdCameraAngleY = thirdCameraAngleY - delta.X * 0.4
+            thirdCameraAngleX = math.clamp(thirdCameraAngleX - delta.Y * 0.4, -20, 80)
+        end
+    end)
+    UserInputService.TouchEnded:Connect(function()
+        lastTouchPos = nil
+    end)
+
+    -- 自己计算第三人称位置（带防穿墙射线）
+    thirdConnection = RunService.RenderStepped:Connect(function()
+        local cam = workspace.CurrentCamera
+        if cam.CameraType ~= Enum.CameraType.Scriptable then
+            cam.CameraType = Enum.CameraType.Scriptable
+        end
+        
+        local myChar = LocalPlayer.Character
+        if not myChar then return end
+        local hrp = myChar:FindFirstChild("HumanoidRootPart")
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not hrp or not myHum or myHum.Health <= 0 then return end
+
+        -- 计算理想的相机位置
+        local headPos = hrp.Position + Vector3.new(0, 1.5, 0)
+        local rot = CFrame.fromEulerAnglesYXZ(math.rad(thirdCameraAngleX), math.rad(thirdCameraAngleY), 0)
+        local offset = rot:VectorToWorldSpace(Vector3.new(0, 0, 12))
+        local targetPos = headPos + offset
+
+        -- 防穿墙检测
+        local raycastParams = RaycastParams.new()
+        raycastParams.FilterDescendantsInstances = {myChar}
+        raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+        local rayResult = workspace:Raycast(headPos, offset, raycastParams)
+        
+        if rayResult then
+            -- 如果被墙挡住，相机拉到墙前面
+            targetPos = rayResult.Position
+        end
+
+        -- 设置相机
+        cam.CFrame = CFrame.new(targetPos, headPos)
+    end)
+end
+
+-- ===== 后台循环 =====
+task.spawn(function()
+    while true do
+        if showPlayer then
+            local name = getNearestPlayer()
+            if textLabel then textLabel.Text = "附近玩家: " .. name end
+        end
+        task.wait(0.5)
+    end
+end)
+task.spawn(function()
+    while true do
+        if boxFarm and Events then
+            local CreateRE = Events:FindFirstChild("CreateRE")
+            if CreateRE then pcall(function() CreateRE:FireServer("Slap Premium Crate", "Cammon", 0) end) end
+        end
+        task.wait(0.1)
+    end
+end)
+task.spawn(function()
+    while true do
+        if chairFarm and Events then
+            local CreateRE = Events:FindFirstChild("CreateRE")
+            if CreateRE then pcall(function() CreateRE:FireServer("Chair Premium Crate", "Cammon", 0) end) end
+        end
+        task.wait(0.1)
+    end
+end)
+
+-- ===== 主窗口 =====
+Window = WindUI:CreateWindow({
+    Title = gradient("谁打了一巴掌", Color3.fromHex("#3B82F6"), Color3.fromHex("#60A5FA")),
+    Author = gradient("作者:神之", Color3.fromHex("#2563EB"), Color3.fromHex("#93C5FD")),
+    IconThemed = true,
+    Folder = "Atomic",
+    Transparent = true,
+    Theme = "Dark",
+    SideBarWidth = 120,
+    HideSearchBar = false,
+    ScrollBarEnabled = true,
+    BackgroundImageTransparency = 0.55,
+    User = { Enabled = true, Anonymous = false, Callback = function() end },
+})
+
+Window:EditOpenButton({ Title = "谁打了一巴掌", CornerRadius = UDim.new(0,2), StrokeThickness = 0.5 })
+
+Window:Tag({ Title = "免费版", Radius = 5, Color = Color3.fromHex("#2563EB") })
+Window:SetToggleKey(Enum.KeyCode.F, true)
+
+if not borderInitialized then
+    task.spawn(function()
+        task.wait(0.5)
+        local stroke = createBorder(Window)
+        if stroke then startBorderAnimation(Window) borderInitialized = true end
+        StartFontEnforcer()
+    end)
+end
+
+local originalOpenFunction = Window.Open
+Window.Open = function(...)
+    local result = originalOpenFunction(...)
+    if borderInitialized and not borderAnimation then
+        task.wait(0.1)
+        startBorderAnimation(Window)
+    end
+    return result
+end
+
+Window:OnClose(function()
+    if borderAnimation then borderAnimation:Disconnect() borderAnimation = nil end
+end)
+
+-- ===== 标签页 =====
+local Tabs = {
+    Notice = Window:Tab({ Title = gradient("公告", Color3.fromHex("#60A5FA"), Color3.fromHex("#3B82F6")), Icon = "info"}),
+    Main = Window:Tab({ Title = "主要功能", Icon = "triangle" }),
+    Settings = Window:Tab({ Title = "设置", Icon = "settings" }),
+}
+
+-- ===== 公告内容（已经完全去掉了 VERSION） =====
+Tabs.Notice:Paragraph({
+    Title = "谁打了一巴掌",
+    Desc = "欢迎使用神脚本，祝您玩得愉快。"
+})
+
+local MainTab = Tabs.Main
+
+MainTab:Toggle({ Title = "刷钱(巴掌农场)", Value = false, Callback = function(v) boxFarm = v end })
+MainTab:Divider()
+MainTab:Toggle({ Title = "刷钱(椅子农场)", Value = false, Callback = function(v) chairFarm = v end })
+MainTab:Divider()
+MainTab:Toggle({
+    Title = "显示最近玩家", Value = false,
+    Callback = function(v)
+        showPlayer = v
+        if v then createUI() else destroyUI() end
+    end
+})
+MainTab:Divider()
+
+-- ===== 自由视角：开启 / 关闭 两个按钮 =====
+MainTab:Button({
+    Title = "开启自由视角",
+    Callback = function()
+        if not freeCam then
+            if flipCam then flipCam = false stopFlipCam() end
+            if forceThird then forceThird = false stopForceThird() end
+            startFreeCam()
+        end
+    end
+})
+
+MainTab:Button({
+    Title = "关闭自由视角",
+    Callback = function()
+        if freeCam then
+            stopFreeCam()
+        end
+    end
+})
+
+MainTab:Divider()
+
+MainTab:Toggle({
+    Title = "反转镜头(面朝前看后面)", Value = false,
+    Callback = function(v)
+        flipCam = v
+        if v then
+            if freeCam then stopFreeCam() end
+            if forceThird then forceThird = false stopForceThird() end
+            startFlipCam()
+        else
+            stopFlipCam()
+        end
+    end
+})
+MainTab:Divider()
+
+MainTab:Toggle({
+    Title = "强制第三人称(无视第一人称锁定)", Value = false,
+    Callback = function(v)
+        forceThird = v
+        if v then
+            if freeCam then stopFreeCam() end
+            if flipCam then flipCam = false stopFlipCam() end
+            startForceThird()
+        else
+            stopForceThird()
+        end
+    end
+})
+
+-- ===== 设置页 =====
+local statusPara = Tabs.Settings:Paragraph({Title = "功能状态", Desc = "加载中..."})
+task.spawn(function()
+    while true do
+        local s = ""
+        s = s .. "巴掌农场: " .. (boxFarm and "✅" or "❌") .. "\n"
+        s = s .. "椅子农场: " .. (chairFarm and "✅" or "❌") .. "\n"
+        s = s .. "显示最近玩家: " .. (showPlayer and "✅" or "❌") .. "\n"
+        s = s .. "自由视角: " .. (freeCam and "✅" or "❌") .. "\n"
+        s = s .. "反转镜头: " .. (flipCam and "✅" or "❌") .. "\n"
+        s = s .. "强制第三人称: " .. (forceThird and "✅" or "❌")
+        statusPara:SetDesc(s)
+        task.wait(1)
+    end
+end)
+Tabs.Settings:Button({ Title = "关闭面板", Callback = function() Window:Close() end })
+
+Window:SelectTab(1)
+
+-- ===== 弹窗通知（也去掉了版本号） =====
+WindUI:Notify({ Title = "谁打了一巴掌", Content = "加载完成", Duration = 3 })
